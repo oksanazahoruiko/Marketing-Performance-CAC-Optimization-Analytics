@@ -1,2 +1,2 @@
-# Marketing-Performance-CAC-Optimization-Analytics
+# Marketing Performance & CAC Optimization Analytics
 Developed a robust data pipeline to transform raw, cumulative marketing data into actionable daily performance metrics. Implemented advanced window functions (ROW_NUMBER, LAG) to deduplicate data streams and extract incremental daily values for spend, clicks, and conversions. Built a final analytical layer to calculate key performance indicators, including CAC, CPM, and LTV/CAC ratios across different acquisition channels.
