@@ -1,0 +1,169 @@
+-- I utilized ROW_NUMBER() to partition data by ad_id and date, ordering records by timestamp in descending order to isolate the most recent entry. I included spend 
+-- in the sort order as a secondary tie-breaker, ensuring that in the event of identical timestamps, the record with the higher spend is selected.
+SELECT
+  *,
+  ROW_NUMBER()
+    OVER (
+      PARTITION BY ad_id, date
+      ORDER BY timestamp DESC, spend DESC
+    ) AS is_latest
+FROM `arcane-footing-496015-t8.CAC_calc.CAC_data`
+
+-- Filtered the result to select only the latest entries by setting WHERE is_latest = 1
+WITH
+  prepdata AS (
+    SELECT *
+    FROM
+      (
+        SELECT
+          *,
+          ROW_NUMBER()
+            OVER (
+              PARTITION BY ad_id, date
+              ORDER BY timestamp DESC, spend DESC
+            ) AS is_latest
+        FROM `arcane-footing-496015-t8.CAC_calc.CAC_data`
+      )
+    WHERE is_latest = 1
+  )
+
+-- Used LAG() partitioned by ad_id to derive daily figures. By calculating the difference between the current cumulative value and the previous day's, 
+-- I stripped away the cumulative effect to show daily spend, clicks, and conversion data.
+
+dataset AS (
+    SELECT
+      source,
+      campaign_id,
+      adset_id,
+      ad_id,
+      date,
+      spend - COALESCE(LAG(spend) OVER (PARTITION BY ad_id ORDER BY date), 0)
+        AS spend,
+      impressions - COALESCE(
+        LAG(impressions) OVER (PARTITION BY ad_id ORDER BY date), 0)
+        AS impressions,
+      clicks - COALESCE(LAG(clicks) OVER (PARTITION BY ad_id ORDER BY date), 0)
+        AS clicks,
+      installs - COALESCE(
+        LAG(installs) OVER (PARTITION BY ad_id ORDER BY date), 0) AS installs,
+      registrations - COALESCE(
+        LAG(registrations) OVER (PARTITION BY ad_id ORDER BY date), 0)
+        AS registrations,
+      timestamp
+    FROM prepdata
+  )
+SELECT *
+FROM dataset
+
+-- Data preview
+
+SELECT *
+FROM dataset
+LIMIT 10
+SELECT COUNT(*) rows_total, COUNT(DISTINCT campaign_id) uniq_cam, COUNT(DISTINCT adset_id) uniq_adset, COUNT(DISTINCT ad_id) uniq_ad
+from dataset
+
+SELECT DISTINCT source
+from dataset
+
+SELECT source, ad_id, COUNT(*) as cnt
+FROM dataset
+GROUP BY 1, 2
+
+-- Checking for NULLS - no nulls in result
+SELECT
+  COUNTIF(source IS NULL) AS null_source,
+  COUNTIF(campaign_id IS NULL) AS null_campaign_id,
+  COUNTIF(adset_id IS NULL) AS null_adset_id,
+  COUNTIF(ad_id IS NULL) AS null_ad_id,
+  COUNTIF(date IS NULL) AS null_date,
+  COUNTIF(spend IS NULL) AS null_spend,
+  COUNTIF(clicks IS NULL) AS null_clicks,
+  COUNTIF(installs IS NULL) AS null_installs,
+  COUNTIF(registrations IS NULL) AS null_registrations,
+  COUNTIF(timestamp IS NULL) AS null_timestamp,
+FROM dataset
+
+-- Check for duplicates - showed no duplicates
+SELECT
+  COUNT(*) AS cnt,
+  COUNT(DISTINCT CONCAT(source, '_', campaign_id, '_', adset_id, '_', ad_id, CAST(timestamp AS string))) AS uniq_events
+FROM dataset
+
+-- Statistics for numeric fields. I used Union to put values in the columns
+SELECT 'Spend' AS metric, MIN(spend) AS min_val, MAX(spend) AS max_val, AVG(spend) AS avg_val,  APPROX_QUANTILES(spend, 100)[OFFSET(50)] AS median FROM dataset
+UNION ALL
+SELECT 'Clicks', MIN(clicks), MAX(clicks), AVG(clicks),  APPROX_QUANTILES(clicks, 100)[OFFSET(50)] FROM dataset
+UNION ALL
+SELECT 'Impressions', MIN(impressions), MAX(impressions), AVG(impressions), APPROX_QUANTILES(impressions, 100)[OFFSET(50)] FROM dataset
+UNION ALL
+SELECT 'Installs', MIN(installs), MAX(installs), AVG(installs), APPROX_QUANTILES(installs, 100)[OFFSET(50)] FROM dataset
+UNION ALL
+SELECT 'Registrations', MIN(registrations), MAX(registrations), AVG(registrations), APPROX_QUANTILES(registrations, 100)[OFFSET(50)] FROM dataset
+
+-- Daily metrics
+SELECT source, date, ROUND(SUM(spend), 2) AS daily_spend, SUM(impressions) AS daily_impressions, SUM(clicks) AS daily_clicks, SUM(installs) AS daily_installs, SUM(registrations) AS daily_registrations
+FROM dataset
+GROUP BY 1, 2
+ORDER BY 1, 2
+
+-- Final query for metrics calculation
+WITH
+  prepdata AS (
+    SELECT *
+    FROM
+      (
+        SELECT
+          *,
+          ROW_NUMBER()
+            OVER (
+              PARTITION BY ad_id, date
+              ORDER BY timestamp DESC, spend DESC
+            ) AS is_latest
+        FROM `arcane-footing-496015-t8.CAC_calc.CAC_data`
+      )
+    WHERE is_latest = 1
+  ),
+  dataset AS (
+    SELECT
+      source,
+      campaign_id,
+      adset_id,
+      ad_id,
+      date,
+      spend - COALESCE(LAG(spend) OVER (PARTITION BY ad_id ORDER BY date), 0)
+        AS spend,
+      impressions - COALESCE(
+        LAG(impressions) OVER (PARTITION BY ad_id ORDER BY date), 0)
+        AS impressions,
+      clicks - COALESCE(LAG(clicks) OVER (PARTITION BY ad_id ORDER BY date), 0)
+        AS clicks,
+      installs - COALESCE(
+        LAG(installs) OVER (PARTITION BY ad_id ORDER BY date), 0) AS installs,
+      registrations - COALESCE(
+        LAG(registrations) OVER (PARTITION BY ad_id ORDER BY date), 0)
+        AS registrations,
+      timestamp
+    FROM prepdata
+  )
+SELECT *,
+ROUND(ltv / cac, 3) AS ltv_cac_ratio
+FROM
+(
+SELECT
+  source,
+  ROUND(SUM(spend)) AS total_spend,
+  ROUND(SUM(spend) / SUM(impressions) * 1000, 3) AS cpm,
+  ROUND(SUM(clicks) / SUM(impressions) * 100, 3) AS ctr_pct,
+  ROUND(SUM(installs) / SUM(clicks) * 100, 3) AS cr_click_install_pct,
+  ROUND(SUM(registrations) / SUM(installs) * 100, 3) AS cr_install_reg_pct,
+  ROUND(SUM(spend) / SUM(registrations), 3) AS cac,
+  CASE
+    WHEN source = 'tiktok' THEN 8.50
+    WHEN source = 'meta' THEN 6.20
+    WHEN source = 'google' THEN 12.40
+    ELSE 0
+  END AS ltv
+FROM dataset
+GROUP BY 1
+)
